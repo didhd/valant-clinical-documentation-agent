@@ -71,12 +71,18 @@ Hard rules:
     statement, omit it or say "Not addressed this session."
   - Always require a risk-assessment section for therapy and crisis sessions.
   - Confirm with the clinician before any EHR write-back step.
-  - Stream incrementally so the clinician sees progress.
-  - Final response must include, in this order:
-      1) the structured note
-      2) the suggested codes
-      3) the QA verdict and any warnings
-      4) a one-line recommendation ("ready for sign-off" / "needs clinician edit")
+  - Be concise. No filler text. Go straight to action.
+  - After calling each tool, IMMEDIATELY present its result in markdown
+    with a clear header. Do not wait until all tools finish. Stream as you go:
+      ## Clinical Note
+      <paste note result here>
+      ## Suggested Codes
+      <paste codes here>
+      ## QA Verdict
+      <paste QA result here>
+      ## Recommendation
+      <one-line: "ready for sign-off" or "needs clinician edit: <reason>">
+  - Do NOT add commentary between sections. Just the headers and content.
 
 Available demo data:
   - Transcript T-CBT-001 (CBT therapy, patient P-1001, 53 min)
@@ -183,17 +189,32 @@ async def invoke(payload: dict[str, Any], context):
     stream = agent.stream_async(prompt)
     last_tool: str | None = None
     async for event in stream:
-        # Surface tool calls once per tool — Strands repeats the in-flight
-        # `current_tool_use` for every delta, so we only emit on transitions.
-        tool_use = event.get("current_tool_use") if isinstance(event, dict) else None
+        if not isinstance(event, dict):
+            continue
+
+        # Detect tool use start from the raw Bedrock event structure.
+        raw = event.get("event")
+        if isinstance(raw, dict):
+            cbs = raw.get("contentBlockStart", {}).get("start", {})
+            if "toolUse" in cbs:
+                name = cbs["toolUse"].get("name") or "unknown"
+                if name != last_tool:
+                    yield f"\n[tool] {name}\n"
+                    last_tool = name
+                continue
+
+        # Also detect via the higher-level key Strands adds in some versions.
+        tool_use = event.get("current_tool_use")
         if tool_use:
             name = tool_use.get("name") or "unknown"
             if name != last_tool:
                 yield f"\n[tool] {name}\n"
                 last_tool = name
             continue
-        last_tool = None
-        if isinstance(event, dict) and "data" in event and isinstance(event["data"], str):
+
+        # Stream text deltas — the "data" key is the text content.
+        if "data" in event and isinstance(event["data"], str):
+            last_tool = None
             yield event["data"]
 
 

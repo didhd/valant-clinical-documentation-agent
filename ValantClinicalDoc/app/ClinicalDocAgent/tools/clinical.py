@@ -73,15 +73,19 @@ def _select_template(session_type: str, modality: str) -> str:
 # -- Specialist system prompts ------------------------------------------------
 
 NOTE_WRITER_PROMPT = """You are a specialized behavioral-health clinical
-documentation scribe. Produce a structured clinical note grounded only in the
-provided transcript and patient context. Never invent clinical findings. If a
-required section has no supporting evidence, write 'Not addressed this
-session.' Use professional clinical language and include risk-assessment
-content for any therapy or crisis encounter.
+documentation scribe. Produce a CONCISE structured clinical note.
 
-Your output is always a single JSON object whose keys are exactly the
-required sections plus a 'metadata' key (template, duration_minutes,
-encounter_date)."""
+Rules:
+- Use bullet points, not paragraphs.
+- Each section: 2-4 bullet points max.
+- Total note must be under 300 words.
+- Never invent clinical findings not supported by the transcript.
+- If a section has no supporting evidence, write '• Not addressed this session.'
+- Always include Risk Assessment section for therapy/crisis encounters.
+- Use professional clinical language.
+
+Output format: Markdown with ## section headers matching the required sections.
+End with a ## Metadata section (template, duration, date)."""
 
 MEDICAL_CODER_PROMPT = """You are a specialized behavioral-health medical
 coder. Suggest ICD-10 (F-codes preferred) and CPT codes from the provided
@@ -228,20 +232,12 @@ def clinical_note_writer(query: str) -> str:
             callback_handler=None,
         )
 
-        prompt = f"""Generate a {chosen_template} note for the session below.
+        prompt = f"""Generate a CONCISE {chosen_template} note (under 300 words, bullet points).
 
-PATIENT CONTEXT:
-- Name: {patient['name']} (DOB {patient['dob']})
-- Diagnoses: {', '.join(patient['diagnoses'])}
-- Active medications: {patient['active_medications']}
-- Treatment goals: {patient['treatment_plan']['goals']}
-- Homework from last session: {patient['treatment_plan']['homework_last_session']}
-- Latest measurements: {patient['measurements']}
-
-SESSION METADATA:
-- Date: {transcript['encounter_date']}
-- Type: {transcript['session_type']} / {transcript['modality']}
-- Duration: {transcript['duration_minutes']} minutes
+PATIENT: {patient['name']} | Dx: {', '.join(patient['diagnoses'][:2])}
+MEDS: {', '.join(m['name'] + ' ' + m['dose'] for m in patient['active_medications'][:3]) or 'none'}
+GOALS: {'; '.join(patient['treatment_plan']['goals'][:2])}
+DATE: {transcript['encounter_date']} | DURATION: {transcript['duration_minutes']} min | TEMPLATE: {chosen_template}
 
 REQUIRED SECTIONS: {spec['sections']}
 

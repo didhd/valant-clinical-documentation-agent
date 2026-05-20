@@ -4,28 +4,42 @@ import Box from "@cloudscape-design/components/box";
 import Button from "@cloudscape-design/components/button";
 import Container from "@cloudscape-design/components/container";
 import ContentLayout from "@cloudscape-design/components/content-layout";
-import ColumnLayout from "@cloudscape-design/components/column-layout";
 import ExpandableSection from "@cloudscape-design/components/expandable-section";
-import FormField from "@cloudscape-design/components/form-field";
+import Grid from "@cloudscape-design/components/grid";
 import Header from "@cloudscape-design/components/header";
 import KeyValuePairs from "@cloudscape-design/components/key-value-pairs";
 import Select from "@cloudscape-design/components/select";
 import type { SelectProps } from "@cloudscape-design/components/select";
 import SpaceBetween from "@cloudscape-design/components/space-between";
 import StatusIndicator from "@cloudscape-design/components/status-indicator";
-import Spinner from "@cloudscape-design/components/spinner";
-import Textarea from "@cloudscape-design/components/textarea";
 import TopNavigation from "@cloudscape-design/components/top-navigation";
 import Badge from "@cloudscape-design/components/badge";
 import Alert from "@cloudscape-design/components/alert";
+import LiveRegion from "@cloudscape-design/components/live-region";
+import PromptInput from "@cloudscape-design/components/prompt-input";
+import Avatar from "@cloudscape-design/chat-components/avatar";
+import ChatBubble from "@cloudscape-design/chat-components/chat-bubble";
+import LoadingBar from "@cloudscape-design/chat-components/loading-bar";
+import SupportPromptGroup from "@cloudscape-design/chat-components/support-prompt-group";
 import {
   getTranscript,
   listTranscripts,
   streamInvocation,
 } from "./api";
 import type { TranscriptDetail, TranscriptSummary } from "./types";
+import Markdown from "./components/Markdown";
 
-type RunState = "idle" | "running" | "done" | "error";
+type Author = "user" | "assistant";
+
+interface ChatMessage {
+  id: string;
+  author: Author;
+  text: string;
+  tools: string[];
+  state: "streaming" | "done" | "error";
+}
+
+const SELECTED_ID_KEY = "valant.selectedTranscriptId";
 
 const FULL_PIPELINE_PROMPT = (transcriptId: string, patientId: string) =>
   `Document session ${transcriptId} for patient ${patientId}. ` +
@@ -33,32 +47,49 @@ const FULL_PIPELINE_PROMPT = (transcriptId: string, patientId: string) =>
   `suggest ICD-10 + CPT codes, then run QA validation. Present the final ` +
   `note, codes, and QA verdict.`;
 
-const ASK_PROMPT = (
-  transcriptId: string,
-  patientId: string,
-  question: string,
-) =>
-  `Active session: transcript_id=${transcriptId}, patient_id=${patientId}. ` +
-  `Use the relevant specialist tool(s) only as needed to answer this ` +
-  `clinician question. Cite which tool(s) you used. Question: ${question.trim()}`;
+const SUPPORT_PROMPTS = [
+  { id: "full", text: "Run the full pipeline" },
+  { id: "si", text: "Active SI discussed?" },
+  { id: "cpt", text: "Best CPT code?" },
+  { id: "summary", text: "3-sentence chart summary" },
+];
 
 export default function App() {
   const [transcripts, setTranscripts] = useState<TranscriptSummary[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedIdState] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(SELECTED_ID_KEY);
+    } catch {
+      return null;
+    }
+  });
+  const setSelectedId = (id: string | null) => {
+    setSelectedIdState(id);
+    try {
+      if (id) localStorage.setItem(SELECTED_ID_KEY, id);
+      else localStorage.removeItem(SELECTED_ID_KEY);
+    } catch {
+      // ignore
+    }
+  };
+
   const [detail, setDetail] = useState<TranscriptDetail | null>(null);
-  const [output, setOutput] = useState<string>("");
-  const [toolEvents, setToolEvents] = useState<string[]>([]);
-  const [state, setState] = useState<RunState>("idle");
   const [error, setError] = useState<string | null>(null);
-  const [question, setQuestion] = useState<string>("");
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [draft, setDraft] = useState<string>("");
+  const [busy, setBusy] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
-  const outputRef = useRef<HTMLPreElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     listTranscripts()
       .then((items) => {
         setTranscripts(items);
-        if (items.length && !selectedId) setSelectedId(items[0].transcript_id);
+        // Use stored selection only if it still exists in the list.
+        const stillThere = items.some((t) => t.transcript_id === selectedId);
+        if (!stillThere && items.length) {
+          setSelectedId(items[0].transcript_id);
+        }
       })
       .catch((err) => setError(String(err)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -67,16 +98,17 @@ export default function App() {
   useEffect(() => {
     if (!selectedId) return;
     setDetail(null);
+    setMessages([]);
     getTranscript(selectedId)
       .then(setDetail)
       .catch((err) => setError(String(err)));
   }, [selectedId]);
 
   useEffect(() => {
-    if (outputRef.current) {
-      outputRef.current.scrollTop = outputRef.current.scrollHeight;
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [output]);
+  }, [messages]);
 
   const selectOptions: SelectProps.Option[] = useMemo(
     () =>
@@ -91,14 +123,30 @@ export default function App() {
   const selectedOption =
     selectOptions.find((o) => o.value === selectedId) ?? null;
 
-  async function runPrompt(prompt: string) {
+  async function sendPrompt(prompt: string) {
+    if (!detail || !prompt.trim() || busy) return;
     abortRef.current?.abort();
     const ctrl = new AbortController();
     abortRef.current = ctrl;
-    setOutput("");
-    setToolEvents([]);
+    setBusy(true);
     setError(null);
-    setState("running");
+
+    const userMsg: ChatMessage = {
+      id: `u-${Date.now()}`,
+      author: "user",
+      text: prompt,
+      tools: [],
+      state: "done",
+    };
+    const assistantId = `a-${Date.now()}`;
+    const assistantMsg: ChatMessage = {
+      id: assistantId,
+      author: "assistant",
+      text: "",
+      tools: [],
+      state: "streaming",
+    };
+    setMessages((prev) => [...prev, userMsg, assistantMsg]);
 
     try {
       let lastTool: string | null = null;
@@ -106,54 +154,98 @@ export default function App() {
         if (chunk.includes("[tool]")) {
           const toolName = chunk.replace(/\n?\[tool\]/g, "").trim();
           if (toolName && toolName !== lastTool) {
-            setToolEvents((evs) => [...evs, toolName]);
             lastTool = toolName;
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantId
+                  ? { ...m, tools: [...m.tools, toolName] }
+                  : m,
+              ),
+            );
           }
           continue;
         }
         lastTool = null;
-        setOutput((prev) => prev + chunk);
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId ? { ...m, text: m.text + chunk } : m,
+          ),
+        );
       }
-      setState("done");
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId ? { ...m, state: "done" } : m,
+        ),
+      );
     } catch (err) {
-      if ((err as Error).name === "AbortError") return;
+      if ((err as Error).name === "AbortError") {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId ? { ...m, state: "done" } : m,
+          ),
+        );
+        return;
+      }
       setError(String(err));
-      setState("error");
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId
+            ? { ...m, state: "error", text: m.text || String(err) }
+            : m,
+        ),
+      );
+    } finally {
+      setBusy(false);
     }
   }
 
-  function runFullPipeline() {
-    if (!detail) return;
-    runPrompt(
-      FULL_PIPELINE_PROMPT(
-        detail.transcript.transcript_id,
-        detail.patient.patient_id,
-      ),
-    );
+  function onSubmit() {
+    const text = draft.trim();
+    if (!text || !detail) return;
+    setDraft("");
+    sendPrompt(text);
   }
 
-  function askQuestion() {
-    if (!detail || !question.trim()) return;
-    runPrompt(
-      ASK_PROMPT(
-        detail.transcript.transcript_id,
-        detail.patient.patient_id,
-        question,
-      ),
-    );
+  function onSupportPrompt(id: string) {
+    const sp = SUPPORT_PROMPTS.find((s) => s.id === id);
+    if (!sp || !detail) return;
+    if (id === "full") {
+      sendPrompt(
+        FULL_PIPELINE_PROMPT(
+          detail.transcript.transcript_id,
+          detail.patient.patient_id,
+        ),
+      );
+    } else {
+      sendPrompt(
+        `Active session: transcript_id=${detail.transcript.transcript_id}, ` +
+          `patient_id=${detail.patient.patient_id}. ${sp.text}`,
+      );
+    }
   }
 
-  function stopPipeline() {
+  function stop() {
     abortRef.current?.abort();
-    setState("idle");
   }
+
+  function clearChat() {
+    abortRef.current?.abort();
+    setMessages([]);
+  }
+
+  const lastAssistantText = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].author === "assistant") return messages[i].text;
+    }
+    return "";
+  }, [messages]);
 
   return (
     <>
       <TopNavigation
         identity={{
           href: "#",
-          title: "Valant Clinical Documentation Agent",
+          title: "ScribeForce",
         }}
         utilities={[
           {
@@ -166,128 +258,177 @@ export default function App() {
       <AppLayout
         toolsHide
         navigationHide
+        maxContentWidth={Number.MAX_VALUE}
         content={
           <ContentLayout
+            disableOverlap
             header={
               <Header
                 variant="h1"
-                description="Skips Nova Sonic — feeds dummy session transcripts to a Bedrock AgentCore + Strands orchestrator that runs the full clinical-note pipeline (context → note → codes → QA)."
+                description="Bedrock AgentCore + Strands orchestrator running a multi-specialist clinical-note pipeline (context → note → codes → QA). Voice input via Nova Sonic — text-only output."
               >
                 Clinician Review
               </Header>
             }
           >
-            <SpaceBetween size="l">
+            <SpaceBetween size="m">
               {error && (
-                <Alert type="error" header="Error">
+                <Alert
+                  type="error"
+                  header="Error"
+                  dismissible
+                  onDismiss={() => setError(null)}
+                >
                   {error}
                 </Alert>
               )}
 
-              <Container
-                header={<Header variant="h2">Session selector</Header>}
+              <Grid
+                gridDefinition={[
+                  { colspan: { default: 12, m: 5, l: 4, xl: 3 } },
+                  { colspan: { default: 12, m: 7, l: 8, xl: 9 } },
+                ]}
               >
-                <SpaceBetween size="m">
-                  <Select
-                    selectedOption={selectedOption}
-                    onChange={(e) =>
-                      setSelectedId(e.detail.selectedOption.value ?? null)
-                    }
-                    options={selectOptions}
-                    placeholder="Choose a transcript"
-                    empty="No transcripts available"
-                  />
-                  <SpaceBetween size="s" direction="horizontal">
-                    <Button
-                      variant="primary"
-                      onClick={runFullPipeline}
-                      loading={state === "running"}
-                      disabled={!detail || state === "running"}
-                    >
-                      Run documentation pipeline
-                    </Button>
-                    {state === "running" && (
-                      <Button onClick={stopPipeline}>Stop</Button>
-                    )}
-                  </SpaceBetween>
-                </SpaceBetween>
-              </Container>
-
-              {detail && (
-                <ColumnLayout columns={2} variant="default">
-                  <Container header={<Header variant="h2">Patient</Header>}>
-                    <KeyValuePairs
-                      columns={1}
-                      items={[
-                        { label: "Name", value: detail.patient.name },
-                        {
-                          label: "Patient ID",
-                          value: detail.patient.patient_id,
-                        },
-                        { label: "DOB", value: detail.patient.dob },
-                        {
-                          label: "Diagnoses",
-                          value: detail.patient.diagnoses.join(", "),
-                        },
-                        {
-                          label: "Active medications",
-                          value: detail.patient.active_medications
-                            .map(
-                              (m) =>
-                                `${m.name} ${m.dose} ${m.frequency}`,
-                            )
-                            .join(", "),
-                        },
-                        {
-                          label: "Sessions remaining",
-                          value: (
-                            <Badge
-                              color={
-                                detail.patient.auth_status
-                                  .sessions_remaining < 4
-                                  ? "red"
-                                  : "green"
-                              }
-                            >
-                              {String(
-                                detail.patient.auth_status
-                                  .sessions_remaining,
-                              )}
-                            </Badge>
-                          ),
-                        },
-                        {
-                          label: "Payer",
-                          value: detail.patient.auth_status.payer,
-                        },
-                        {
-                          label: "Latest measurements",
-                          value: Object.entries(
-                            detail.patient.measurements,
-                          )
-                            .map(
-                              ([k, v]) =>
-                                `${k}=${v.latest} (trend ${v.trend.join(",")})`,
-                            )
-                            .join(" · "),
-                        },
-                      ]}
-                    />
-                  </Container>
-
+                {/* LEFT RAIL ------------------------------------------------ */}
+                <SpaceBetween size="s">
                   <Container
                     header={
                       <Header
-                        variant="h2"
-                        description={`${detail.transcript.modality} · ${detail.transcript.duration_minutes} min · ${detail.transcript.utterances.length} utterances`}
+                        variant="h3"
+                        description={
+                          detail
+                            ? `${detail.transcript.modality} · ${detail.transcript.duration_minutes} min`
+                            : `${transcripts.length} sessions`
+                        }
                       >
-                        Transcript
+                        Session
                       </Header>
                     }
                   >
-                    <Box>
+                    <Select
+                      selectedOption={selectedOption}
+                      onChange={(e) =>
+                        setSelectedId(e.detail.selectedOption.value ?? null)
+                      }
+                      options={selectOptions}
+                      placeholder="Choose a transcript"
+                      empty="No transcripts available"
+                      filteringType="auto"
+                      expandToViewport
+                    />
+                  </Container>
+
+                  {detail && (
+                    <Container
+                      header={<Header variant="h3">Patient</Header>}
+                    >
+                      <KeyValuePairs
+                        columns={1}
+                        items={[
+                          { label: "Name", value: detail.patient.name },
+                          {
+                            label: "ID",
+                            value: detail.patient.patient_id,
+                          },
+                          ...(detail.patient.dob
+                            ? [{ label: "DOB", value: detail.patient.dob }]
+                            : []),
+                          {
+                            label: "Diagnoses",
+                            value:
+                              detail.patient.diagnoses
+                                .map((d) => d.split(" ")[0])
+                                .join(", ") || "—",
+                          },
+                          {
+                            label: "Sessions left",
+                            value: (
+                              <Badge
+                                color={
+                                  detail.patient.auth_status
+                                    .sessions_remaining < 4
+                                    ? "red"
+                                    : "green"
+                                }
+                              >
+                                {String(
+                                  detail.patient.auth_status
+                                    .sessions_remaining,
+                                )}
+                              </Badge>
+                            ),
+                          },
+                          {
+                            label: "Payer",
+                            value: detail.patient.auth_status.payer,
+                          },
+                          ...(Object.keys(detail.patient.measurements).length >
+                          0
+                            ? [
+                                {
+                                  label: "Scores",
+                                  value: Object.entries(
+                                    detail.patient.measurements,
+                                  )
+                                    .map(([k, v]) => `${k}=${v.latest}`)
+                                    .join(" · "),
+                                },
+                              ]
+                            : []),
+                        ]}
+                      />
+                      <Box margin={{ top: "s" }}>
+                        <ExpandableSection
+                          variant="footer"
+                          headerText="More details"
+                        >
+                          <KeyValuePairs
+                            columns={1}
+                            items={[
+                              {
+                                label: "Full diagnoses",
+                                value:
+                                  detail.patient.diagnoses.join("; ") || "—",
+                              },
+                              {
+                                label: "Active meds",
+                                value:
+                                  detail.patient.active_medications
+                                    .map(
+                                      (m) =>
+                                        `${m.name} ${m.dose} ${m.frequency}`,
+                                    )
+                                    .join(", ") || "—",
+                              },
+                              ...(detail.patient.previous_session_summary
+                                ? [
+                                    {
+                                      label: "Last session",
+                                      value:
+                                        detail.patient.previous_session_summary,
+                                    },
+                                  ]
+                                : []),
+                            ]}
+                          />
+                        </ExpandableSection>
+                      </Box>
+                    </Container>
+                  )}
+
+                  {detail && (
+                    <Container
+                      header={
+                        <Header
+                          variant="h3"
+                          description={`${detail.transcript.utterances.length} utterances`}
+                        >
+                          Transcript
+                        </Header>
+                      }
+                    >
                       <ExpandableSection
-                        defaultExpanded
+                        variant="footer"
                         headerText="Show full transcript"
                       >
                         <pre
@@ -296,7 +437,7 @@ export default function App() {
                             margin: 0,
                             maxHeight: 320,
                             overflow: "auto",
-                            fontSize: 12,
+                            fontSize: 11,
                             lineHeight: 1.5,
                           }}
                         >
@@ -308,132 +449,189 @@ export default function App() {
                             .join("\n")}
                         </pre>
                       </ExpandableSection>
-                    </Box>
-                  </Container>
-                </ColumnLayout>
-              )}
-
-              <Container
-                header={
-                  <Header
-                    variant="h2"
-                    actions={
-                      state === "running" ? (
-                        <Spinner />
-                      ) : state === "done" ? (
-                        <StatusIndicator type="success">
-                          Stream complete
-                        </StatusIndicator>
-                      ) : state === "error" ? (
-                        <StatusIndicator type="error">
-                          Failed
-                        </StatusIndicator>
-                      ) : (
-                        <StatusIndicator type="pending">
-                          Idle
-                        </StatusIndicator>
-                      )
-                    }
-                  >
-                    Agent output (streaming)
-                  </Header>
-                }
-              >
-                <SpaceBetween size="s">
-                  {toolEvents.length > 0 && (
-                    <Box>
-                      <SpaceBetween size="xxs" direction="horizontal">
-                        {toolEvents.map((t, i) => (
-                          <Badge color="blue" key={`${t}-${i}`}>
-                            {t}
-                          </Badge>
-                        ))}
-                      </SpaceBetween>
-                    </Box>
+                    </Container>
                   )}
-                  <pre
-                    ref={outputRef}
-                    style={{
-                      whiteSpace: "pre-wrap",
-                      margin: 0,
-                      minHeight: 240,
-                      maxHeight: 540,
-                      overflow: "auto",
-                      background: "#f4f4f4",
-                      padding: 12,
-                      borderRadius: 4,
-                      fontSize: 13,
-                      lineHeight: 1.55,
-                    }}
-                  >
-                    {output ||
-                      (state === "idle"
-                        ? "Press “Run documentation pipeline” to start, or ask a question below."
-                        : "Waiting for first chunk…")}
-                  </pre>
                 </SpaceBetween>
-              </Container>
 
-              <Container
-                header={
-                  <Header
-                    variant="h2"
-                    description="Ask the orchestrator anything about this session — it routes to the relevant specialist (context, note, coder, QA) automatically."
-                  >
-                    Ask the agent
-                  </Header>
-                }
-              >
-                <SpaceBetween size="s">
-                  <FormField
-                    label="Clinician question"
-                    description={
-                      detail
-                        ? `Context: ${detail.transcript.transcript_id} · ${detail.patient.name} (${detail.patient.patient_id})`
-                        : "Pick a transcript first."
-                    }
-                  >
-                    <Textarea
-                      value={question}
-                      onChange={(e) => setQuestion(e.detail.value)}
-                      placeholder="e.g., What CPT code best fits this 53-minute CBT session and why? Or: Did the patient mention any active SI?"
-                      rows={3}
-                      onKeyDown={(e) => {
-                        if (
-                          e.detail.key === "Enter" &&
-                          (e.detail.metaKey || e.detail.ctrlKey)
-                        ) {
-                          askQuestion();
-                        }
-                      }}
-                    />
-                  </FormField>
-                  <SpaceBetween size="s" direction="horizontal">
-                    <Button
-                      variant="primary"
-                      onClick={askQuestion}
-                      disabled={
-                        !detail || !question.trim() || state === "running"
+                {/* RIGHT COLUMN — CHAT ------------------------------------- */}
+                <Container
+                  disableContentPaddings
+                  header={
+                    <Header
+                      variant="h2"
+                      description="Routes to the right specialist (context, note, coder, QA) automatically."
+                      actions={
+                        <SpaceBetween size="xs" direction="horizontal">
+                          {busy && (
+                            <Button onClick={stop} iconName="status-stopped">
+                              Stop
+                            </Button>
+                          )}
+                          {messages.length > 0 && !busy && (
+                            <Button onClick={clearChat} iconName="refresh">
+                              New chat
+                            </Button>
+                          )}
+                        </SpaceBetween>
                       }
                     >
-                      Ask agent
-                    </Button>
-                    <Button
-                      onClick={() => setQuestion("")}
-                      disabled={!question}
+                      Generative AI chat
+                    </Header>
+                  }
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      height: "calc(100vh - 200px)",
+                      minHeight: 480,
+                    }}
+                  >
+                    <div
+                      role="region"
+                      aria-label="Chat"
+                      ref={scrollRef}
+                      style={{
+                        flex: 1,
+                        overflowY: "auto",
+                        padding: "16px 20px",
+                      }}
                     >
-                      Clear
-                    </Button>
-                    <Box variant="small" color="text-body-secondary">
-                      Tip: ⌘/Ctrl+Enter to send
-                    </Box>
-                  </SpaceBetween>
-                </SpaceBetween>
-              </Container>
+                      {messages.length === 0 ? (
+                        <Box
+                          color="text-body-secondary"
+                          textAlign="center"
+                          padding="xxl"
+                        >
+                          <SpaceBetween size="s">
+                            <div style={{ fontSize: 32 }}>💬</div>
+                            <Box variant="h3" color="text-body-secondary">
+                              Ready when you are
+                            </Box>
+                            <div>
+                              Pick a quick prompt below or ask anything about{" "}
+                              {detail
+                                ? `${detail.transcript.transcript_id} — ${detail.patient.name}`
+                                : "the selected session"}
+                              .
+                            </div>
+                          </SpaceBetween>
+                        </Box>
+                      ) : (
+                        <SpaceBetween size="m">
+                          {messages.map((m) => (
+                            <ChatMessageView key={m.id} message={m} />
+                          ))}
+                        </SpaceBetween>
+                      )}
+                      <LiveRegion hidden assertive>
+                        {lastAssistantText.slice(-280)}
+                      </LiveRegion>
+                    </div>
+
+                    <div
+                      style={{
+                        borderTop: "1px solid #e9ebed",
+                        padding: 12,
+                        background: "#fafbfc",
+                      }}
+                    >
+                      <SpaceBetween size="xs">
+                        {detail && messages.length === 0 && (
+                          <SupportPromptGroup
+                            ariaLabel="Suggested prompts"
+                            onItemClick={(e) => onSupportPrompt(e.detail.id)}
+                            items={SUPPORT_PROMPTS.map((p) => ({
+                              text: p.text,
+                              id: p.id,
+                            }))}
+                          />
+                        )}
+
+                        <PromptInput
+                          value={draft}
+                          onChange={(e) => setDraft(e.detail.value)}
+                          onAction={onSubmit}
+                          actionButtonAriaLabel={
+                            busy ? "Sending — disabled" : "Send message"
+                          }
+                          actionButtonIconName="send"
+                          placeholder={
+                            detail
+                              ? `Ask about ${detail.transcript.transcript_id} — ${detail.patient.name}`
+                              : "Pick a session first"
+                          }
+                          ariaLabel="Clinician question"
+                          minRows={1}
+                          maxRows={4}
+                          disableActionButton={
+                            busy || !detail || !draft.trim()
+                          }
+                          disabled={!detail}
+                        />
+
+                        {busy ? (
+                          <LoadingBar variant="gen-ai-masked" />
+                        ) : (
+                          <Box variant="small" color="text-body-secondary">
+                            <StatusIndicator type="success">
+                              Ready
+                            </StatusIndicator>
+                          </Box>
+                        )}
+                      </SpaceBetween>
+                    </div>
+                  </div>
+                </Container>
+              </Grid>
             </SpaceBetween>
           </ContentLayout>
         }
       />
     </>
+  );
+}
+
+function ChatMessageView({ message }: { message: ChatMessage }) {
+  const isUser = message.author === "user";
+  return (
+    <ChatBubble
+      ariaLabel={`${isUser ? "You" : "Assistant"} message`}
+      type={isUser ? "outgoing" : "incoming"}
+      avatar={
+        isUser ? (
+          <Avatar ariaLabel="Clinician" tooltipText="Clinician" initials="DR" />
+        ) : (
+          <Avatar
+            color="gen-ai"
+            iconName="gen-ai"
+            ariaLabel="Documentation agent"
+            tooltipText="Documentation agent"
+            loading={message.state === "streaming"}
+          />
+        )
+      }
+    >
+      {isUser ? (
+        <Box>{message.text}</Box>
+      ) : (
+        <SpaceBetween size="xs">
+          {message.tools.length > 0 && (
+            <SpaceBetween size="xxs" direction="horizontal">
+              {message.tools.map((t, i) => (
+                <Badge color="blue" key={`${t}-${i}`}>
+                  {t}
+                </Badge>
+              ))}
+            </SpaceBetween>
+          )}
+          {message.text ? (
+            <Markdown source={message.text} />
+          ) : message.state === "streaming" ? (
+            <Box color="text-body-secondary">Thinking…</Box>
+          ) : null}
+        </SpaceBetween>
+      )}
+    </ChatBubble>
   );
 }
