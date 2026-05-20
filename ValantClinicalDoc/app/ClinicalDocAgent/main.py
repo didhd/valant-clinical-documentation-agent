@@ -24,8 +24,12 @@ from tools import (
     qa_reviewer,
 )
 
+import uuid as _uuid
+
 app = BedrockAgentCoreApp()
 log = app.logger
+
+_local_session_id = f"dev-{_uuid.uuid4().hex[:8]}"
 
 # CORS so the Vite dev server (5173) can call us during the hackathon.
 app.add_middleware(
@@ -207,12 +211,12 @@ async def invoke(payload: dict[str, Any], context):
         return
 
     # In deployed AgentCore Runtime, context provides session_id.
-    # Locally (python main.py), fall back to a payload field or a stable default
-    # so memory works across requests within the same dev server lifetime.
+    # Locally, use a payload field or a per-server-boot session so memory
+    # persists within one dev run but doesn't load stale history from prior runs.
     session_id = (
         getattr(context, "session_id", None)
         or payload.get("session_id")
-        or "local-dev-session"
+        or _local_session_id
     )
     agent = _build_agent(session_id)
 
