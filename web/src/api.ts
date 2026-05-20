@@ -1,8 +1,25 @@
 import type { TranscriptDetail, TranscriptSummary } from "./types";
 
+async function fetchWithFallback(
+  primary: string,
+  fallback: string,
+): Promise<Response> {
+  try {
+    const res = await fetch(primary);
+    if (res.ok) {
+      const ct = res.headers.get("content-type") || "";
+      if (ct.includes("json")) return res;
+    }
+  } catch {
+    // backend unreachable
+  }
+  const res = await fetch(fallback);
+  if (!res.ok) throw new Error(`Fetch failed: ${fallback} (${res.status})`);
+  return res;
+}
+
 export async function listTranscripts(): Promise<TranscriptSummary[]> {
-  const res = await fetch("/transcripts");
-  if (!res.ok) throw new Error(`GET /transcripts failed: ${res.status}`);
+  const res = await fetchWithFallback("/transcripts", "/api/transcripts.json");
   const json = await res.json();
   return json.transcripts;
 }
@@ -10,16 +27,22 @@ export async function listTranscripts(): Promise<TranscriptSummary[]> {
 export async function getTranscript(
   transcriptId: string,
 ): Promise<TranscriptDetail> {
-  const res = await fetch(`/transcripts/${transcriptId}`);
-  if (!res.ok)
-    throw new Error(`GET /transcripts/${transcriptId} failed: ${res.status}`);
+  const res = await fetchWithFallback(
+    `/transcripts/${transcriptId}`,
+    `/api/transcripts-${transcriptId}.json`,
+  );
   return await res.json();
+}
+
+export function isBackendAvailable(): Promise<boolean> {
+  return fetch("/transcripts")
+    .then((r) => r.ok && (r.headers.get("content-type") || "").includes("json"))
+    .catch(() => false);
 }
 
 /**
  * Stream the orchestrator response as SSE-style `data: ...` lines.
- * Yields each text chunk as it arrives. The agent emits both literal text
- * deltas (JSON-encoded strings) and structural markers like `[tool] name`.
+ * Yields each text chunk as it arrives.
  */
 export async function* streamInvocation(
   prompt: string,
@@ -52,7 +75,6 @@ export async function* streamInvocation(
       const raw = line.slice(5).trim();
       if (!raw) continue;
       try {
-        // The agent yields strings — JSON-decode them so escapes resolve.
         const parsed = JSON.parse(raw);
         if (typeof parsed === "string") {
           yield parsed;

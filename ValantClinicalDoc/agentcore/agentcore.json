@@ -13,9 +13,11 @@
       "build": "CodeZip",
       "entrypoint": "main.py",
       "codeLocation": "app/ClinicalDocAgent/",
-      "runtimeVersion": "PYTHON_3_14",
+      "runtimeVersion": "PYTHON_3_12",
       "networkMode": "PUBLIC",
-      "protocol": "HTTP"
+      "protocol": "HTTP",
+      "idleTimeout": 900,
+      "maxLifetime": 3600
     }
   ],
   "memories": [

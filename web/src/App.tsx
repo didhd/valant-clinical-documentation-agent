@@ -23,6 +23,7 @@ import LoadingBar from "@cloudscape-design/chat-components/loading-bar";
 import SupportPromptGroup from "@cloudscape-design/chat-components/support-prompt-group";
 import {
   getTranscript,
+  isBackendAvailable,
   listTranscripts,
   streamInvocation,
 } from "./api";
@@ -40,12 +41,6 @@ interface ChatMessage {
 }
 
 const SELECTED_ID_KEY = "valant.selectedTranscriptId";
-
-const FULL_PIPELINE_PROMPT = (transcriptId: string, patientId: string) =>
-  `Document session ${transcriptId} for patient ${patientId}. ` +
-  `Run the full pipeline: pull patient context, generate the clinical note, ` +
-  `suggest ICD-10 + CPT codes, then run QA validation. Present the final ` +
-  `note, codes, and QA verdict.`;
 
 const SUPPORT_PROMPTS = [
   { id: "full", text: "Run the full pipeline" },
@@ -78,14 +73,15 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState<string>("");
   const [busy, setBusy] = useState(false);
+  const [backendUp, setBackendUp] = useState(true);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    isBackendAvailable().then(setBackendUp);
     listTranscripts()
       .then((items) => {
         setTranscripts(items);
-        // Use stored selection only if it still exists in the list.
         const stillThere = items.some((t) => t.transcript_id === selectedId);
         if (!stillThere && items.length) {
           setSelectedId(items[0].transcript_id);
@@ -278,6 +274,11 @@ export default function App() {
             }
           >
             <SpaceBetween size="m">
+              {!backendUp && (
+                <Alert type="info" header="Read-only mode">
+                  Backend agent not connected. Patient data and transcripts are shown from static snapshot. Chat requires the agent running locally (make dev).
+                </Alert>
+              )}
               {error && (
                 <Alert
                   type="error"
