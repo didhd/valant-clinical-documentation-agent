@@ -206,7 +206,14 @@ async def invoke(payload: dict[str, Any], context):
         yield "No prompt provided. Try: 'Document session T-CBT-001 for patient P-1001.'"
         return
 
-    session_id = getattr(context, "session_id", None)
+    # In deployed AgentCore Runtime, context provides session_id.
+    # Locally (python main.py), fall back to a payload field or a stable default
+    # so memory works across requests within the same dev server lifetime.
+    session_id = (
+        getattr(context, "session_id", None)
+        or payload.get("session_id")
+        or "local-dev-session"
+    )
     agent = _build_agent(session_id)
 
     stream = agent.stream_async(prompt)
