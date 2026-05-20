@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+ValantClinicalDoc/app/*/.venv/
+ValantClinicalDoc/agentcore/.cli/
+ValantClinicalDoc/agentcore/.env.local
+ValantClinicalDoc/agentcore/cdk/cdk.out/
+ValantClinicalDoc/agentcore/cdk/node_modules/
+
+# Node
+web/node_modules/
+web/dist/
+web/.vite/
+
+# OS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+
+# Local artifacts
+.playwright-cli/
+*.log
+/tmp/
+.omc/
+
+# Optional clinical data overlay (user-supplied)
+valant_clinical_transcripts.json
