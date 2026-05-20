@@ -131,10 +131,20 @@ export default function App() {
     setBusy(true);
     setError(null);
 
+    // Inject session context so the orchestrator always knows which
+    // transcript/patient is active. The user sees only their own text.
+    const contextPrefix =
+      `[Active session: transcript_id=${detail.transcript.transcript_id}, ` +
+      `patient_id=${detail.patient.patient_id}, ` +
+      `patient_name=${detail.patient.name}, ` +
+      `modality=${detail.transcript.modality}, ` +
+      `duration=${detail.transcript.duration_minutes}min]\n\n`;
+    const fullPrompt = contextPrefix + prompt;
+
     const userMsg: ChatMessage = {
       id: `u-${Date.now()}`,
       author: "user",
-      text: prompt,
+      text: prompt, // Show only user's text in the bubble
       tools: [],
       state: "done",
     };
@@ -150,7 +160,7 @@ export default function App() {
 
     try {
       let lastTool: string | null = null;
-      for await (const chunk of streamInvocation(prompt, ctrl.signal)) {
+      for await (const chunk of streamInvocation(fullPrompt, ctrl.signal)) {
         if (chunk.includes("[tool]")) {
           const toolName = chunk.replace(/\n?\[tool\]/g, "").trim();
           if (toolName && toolName !== lastTool) {
@@ -211,16 +221,12 @@ export default function App() {
     if (!sp || !detail) return;
     if (id === "full") {
       sendPrompt(
-        FULL_PIPELINE_PROMPT(
-          detail.transcript.transcript_id,
-          detail.patient.patient_id,
-        ),
+        "Run the full pipeline: pull patient context, generate the clinical note, " +
+          "suggest ICD-10 + CPT codes, then run QA validation. Present the final " +
+          "note, codes, and QA verdict.",
       );
     } else {
-      sendPrompt(
-        `Active session: transcript_id=${detail.transcript.transcript_id}, ` +
-          `patient_id=${detail.patient.patient_id}. ${sp.text}`,
-      );
+      sendPrompt(sp.text);
     }
   }
 
@@ -250,7 +256,7 @@ export default function App() {
         utilities={[
           {
             type: "button",
-            text: "Hackathon · Bedrock AgentCore + Strands",
+            text: "Bedrock AgentCore + Strands",
             disableUtilityCollapse: true,
           },
         ]}
