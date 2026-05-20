@@ -72,6 +72,14 @@ Hard rules:
   - Always require a risk-assessment section for therapy and crisis sessions.
   - Confirm with the clinician before any EHR write-back step.
   - Be concise. No filler text. Go straight to action.
+  - Never use emojis in your output.
+  - If you recall any user preferences from memory (injected in your context
+    by the memory session manager), acknowledge them visibly at the start of
+    your response with a line like:
+      > Recalled preference: <what you remembered>
+    This helps the clinician see that memory is working.
+  - If the user asks you to remember something, confirm with:
+      > Stored: <what will be remembered next session>
   - After calling each tool, IMMEDIATELY present its result in markdown
     with a clear header. Do not wait until all tools finish. Stream as you go:
       ## Clinical Note
@@ -100,21 +108,36 @@ def _build_session_manager(session_id: str | None):
     if not memory_id or not session_id:
         return None
     try:
-        from strands.session.agentcore_memory_session_manager import (
+        from bedrock_agentcore.memory.integrations.strands.config import (
+            AgentCoreMemoryConfig,
+            RetrievalConfig,
+        )
+        from bedrock_agentcore.memory.integrations.strands.session_manager import (
             AgentCoreMemorySessionManager,
         )
     except ImportError:
-        log.warning("strands AgentCoreMemorySessionManager unavailable; "
-                    "skipping memory wiring")
+        log.warning("bedrock_agentcore memory integration unavailable; "
+                    "skipping memory wiring. Install with: "
+                    "pip install 'bedrock-agentcore[strands-agents]'")
         return None
 
     region = os.environ.get("AWS_REGION", "us-west-2")
     actor_id = os.environ.get("ACTOR_ID", "clinician")
+
+    config = AgentCoreMemoryConfig(
+        memory_id=memory_id,
+        session_id=session_id,
+        actor_id=actor_id,
+        retrieval_config={
+            f"/users/{actor_id}/preferences": RetrievalConfig(
+                top_k=5,
+                relevance_score=0.3,
+            ),
+        },
+    )
     try:
         return AgentCoreMemorySessionManager(
-            memory_id=memory_id,
-            session_id=session_id,
-            actor_id=actor_id,
+            agentcore_memory_config=config,
             region_name=region,
         )
     except Exception as exc:  # pragma: no cover - resilient stub

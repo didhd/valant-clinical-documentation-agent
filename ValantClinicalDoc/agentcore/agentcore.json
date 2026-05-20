@@ -18,7 +18,20 @@
       "protocol": "HTTP"
     }
   ],
-  "memories": [],
+  "memories": [
+    {
+      "name": "ClinicalDocMemory",
+      "eventExpiryDuration": 30,
+      "strategies": [
+        {
+          "type": "USER_PREFERENCE",
+          "namespaces": [
+            "/users/{actorId}/preferences"
+          ]
+        }
+      ]
+    }
+  ],
   "credentials": [],
   "evaluators": [],
   "onlineEvalConfigs": [],
